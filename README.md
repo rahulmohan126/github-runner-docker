@@ -17,7 +17,7 @@ A Docker image and Compose stack for running **GitHub Actions self-hosted runner
 Requirements: Docker Engine (or Docker Desktop) with the Compose v2 plugin.
 
 ```bash
-git clone <this-repo-url> github-runner-docker
+git clone https://github.com/rahulmohan126/github-runner-docker.git
 cd github-runner-docker
 cp .env.example .env        # edit RUNNER_NAME / RUNNER_LABELS / RUNNER_IMAGE
 ./setup.sh                  # prompts for the repo URL and a registration token
