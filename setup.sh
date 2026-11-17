@@ -37,7 +37,7 @@ if [ -z "$MODE" ]; then
     if [ -n "${RUNNER_IMAGE:-}" ]; then MODE=pull; else MODE=build; fi
 fi
 if [ "$MODE" = pull ] && [ -z "${RUNNER_IMAGE:-}" ]; then
-    echo "--pull requires RUNNER_IMAGE (set it in .env, e.g. <dockerhub-user>/github-runner:latest)." >&2
+    echo "--pull requires RUNNER_IMAGE (set it in .env, e.g. rahulmohan126/github-runner:latest)." >&2
     exit 1
 fi
 

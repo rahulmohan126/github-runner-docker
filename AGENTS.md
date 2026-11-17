@@ -39,7 +39,7 @@ Ask for:
 2. **Runner name** (default `home-server-runner`). It must be unique among the runners registered at that scope. If this machine already runs one, suggest something like `<hostname>-runner-2`.
 3. **Labels** (default `docker,self-hosted,linux`).
 4. **Image source**:
-   - *Pull* a published image: ask for the Docker Hub image, e.g. `<dockerhub-user>/github-runner:latest`. Don't guess the namespace.
+   - *Pull* the published image `rahulmohan126/github-runner:latest` (from Docker Hub), or another image the user names.
    - *Build* locally (the default if they have no published image).
 5. Whether workflows need to **run Docker commands** (build or push images). If yes, explain that this mounts the host Docker socket and gives workflows root-equivalent access to the host, then get explicit confirmation.
 

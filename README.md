@@ -56,7 +56,7 @@ jobs:
 
 | Variable           | Default                     | Purpose                                                        |
 | ------------------ | --------------------------- | -------------------------------------------------------------- |
-| `RUNNER_IMAGE`     | `github-runner:local`       | Image to run. Set to `<dockerhub-user>/github-runner:latest` to pull instead of build. |
+| `RUNNER_IMAGE`     | `github-runner:local`       | Image to run. Set to `rahulmohan126/github-runner:latest` to pull instead of build. |
 | `RUNNER_NAME`      | `home-server-runner`        | Runner name shown in GitHub (must be unique)                   |
 | `RUNNER_LABELS`    | `docker,self-hosted,linux`  | Comma-separated labels for `runs-on`                           |
 | `RUNNER_EPHEMERAL` | `false`                     | Register with `--ephemeral` (one job per registration)         |
@@ -143,5 +143,5 @@ Manual build and push:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t <dockerhub-user>/github-runner:latest --push .
+  -t rahulmohan126/github-runner:latest --push .
 ```
