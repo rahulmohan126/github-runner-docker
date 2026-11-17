@@ -1,0 +1,31 @@
+services:
+  github-runner:
+    # Set RUNNER_IMAGE in .env to run a published image from Docker Hub;
+    # otherwise `docker compose build` produces github-runner:local.
+    image: ${RUNNER_IMAGE:-github-runner:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    restart: unless-stopped
+    init: true
+
+    environment:
+      RUNNER_NAME: ${RUNNER_NAME:-home-server-runner}
+      RUNNER_LABELS: ${RUNNER_LABELS:-docker,self-hosted,linux}
+      RUNNER_EPHEMERAL: ${RUNNER_EPHEMERAL:-false}
+      # Only used for automatic (PAT-based) registration. Leave unset for
+      # the one-time token flow in setup.sh.
+      RUNNER_URL: ${RUNNER_URL:-}
+      ACCESS_TOKEN: ${ACCESS_TOKEN:-}
+
+    volumes:
+      - runner-data:/runner
+
+    security_opt:
+      - no-new-privileges:true
+
+    stop_grace_period: 2m
+
+volumes:
+  runner-data:

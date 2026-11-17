@@ -1,0 +1,6 @@
+# Local reference notes - intentionally not committed
+CONTEXT.md
+
+# Local configuration (may contain secrets)
+.env
+docker-compose.override.yml
