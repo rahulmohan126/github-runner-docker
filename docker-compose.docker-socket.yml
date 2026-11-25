@@ -1,4 +1,5 @@
-# Opt-in: give workflows access to the HOST Docker daemon.
+# Give workflows the HOST Docker daemon, with host networking. This is the
+# default for the CI deployment (.env.example enables it).
 #
 # WARNING: anyone who can run a workflow on this runner gets root-equivalent
 # control of the host. Use only with private repositories you fully control.
@@ -18,3 +19,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     group_add:
       - "${DOCKER_GID:?Set DOCKER_GID in .env (see docker-compose.docker-socket.yml)}"
+    # Containers started on the host daemon (Actions `services:`, testcontainers,
+    # `docker run -p`, `docker compose up`) publish their ports on the HOST.
+    # Job steps run inside this container, so it shares the host's network
+    # namespace: localhost:5432 in a step then reaches a service's 5432:5432.
+    # Side effect: anything a job listens on is listening on the host.
+    network_mode: host

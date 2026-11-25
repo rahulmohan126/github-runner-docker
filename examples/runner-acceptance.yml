@@ -1,0 +1,146 @@
+# Acceptance checks for a runner deployed with this repo's CI defaults
+# (host Docker socket, host networking, same-path runner directory).
+#
+# Copy into the repository the runner is registered to, e.g.
+#   humming/.github/workflows/runner-acceptance.yml
+# and run it from the Actions tab. A workflow in github-runner-docker itself
+# would never reach the runner, which is registered to that other repo.
+name: Self-hosted runner acceptance
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+
+jobs:
+  acceptance:
+    # Replace my-project with a label from the runner's RUNNER_LABELS. Getting a
+    # job at all proves the runner is online with that label.
+    runs-on: [self-hosted, linux, my-project]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        # Fixed host port, as the CI uses. Fails if another job or a local
+        # Postgres already holds 5432 on the host (see README, "Concurrency").
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        # Random host port: the concurrency-safe pattern (and what testcontainers does).
+        ports: ["6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Runner identity
+        run: |
+          echo "runner: $RUNNER_NAME"
+          id
+          uname -a
+          echo "workspace: $GITHUB_WORKSPACE"
+
+      - name: Build tools (cgo needs gcc)
+        run: gcc --version
+
+      # Installs the tools from the repository's own mise config, as the CI
+      # does. It must include go and node; add them there if it doesn't.
+      - name: Install tools with mise
+        uses: jdx/mise-action@v5
+
+      - name: Toolchain versions
+        run: go version && node --version
+
+      - name: go test -race
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p racetest && cd racetest
+          go mod init racetest
+          cat > race_test.go <<'EOF'
+          package racetest
+
+          import (
+          	"sync"
+          	"testing"
+          )
+
+          func TestCounter(t *testing.T) {
+          	var mu sync.Mutex
+          	var wg sync.WaitGroup
+          	n := 0
+          	for i := 0; i < 10; i++ {
+          		wg.Add(1)
+          		go func() { defer wg.Done(); mu.Lock(); n++; mu.Unlock() }()
+          	}
+          	wg.Wait()
+          	if n != 10 {
+          		t.Fatal(n)
+          	}
+          }
+          EOF
+          CGO_ENABLED=1 go test -race ./...
+
+      - name: docker run
+        run: docker run --rm hello-world
+
+      - name: Service container on localhost (fixed port)
+        run: pg_isready -h localhost -p 5432
+
+      - name: Service container on localhost (random port)
+        env:
+          REDIS_PORT: ${{ job.services.redis.ports['6379'] }}
+        run: printf 'PING\r\n' | nc -w 2 localhost "$REDIS_PORT" | grep PONG
+
+      - name: Same-path bind mount from the workspace
+        run: |
+          echo same-path-ok > somefile
+          test "$(docker run --rm -v "$PWD/somefile:/x:ro" busybox cat /x)" = same-path-ok
+
+      - name: docker compose with a relative bind mount
+        env:
+          # Unique per run, so concurrent jobs don't share a compose project.
+          COMPOSE_PROJECT_NAME: acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          mkdir -p nginx/templates
+          echo template-ok > nginx/templates/a.conf
+          cat > compose.acceptance.yml <<'EOF'
+          services:
+            t:
+              image: busybox
+              volumes: ["./nginx/templates:/t:ro"]
+              command: cat /t/a.conf
+          EOF
+          docker compose -f compose.acceptance.yml run --rm t | grep template-ok
+          docker compose -f compose.acceptance.yml down -v
+
+      - name: docker build
+        run: |
+          mkdir -p "$RUNNER_TEMP/build"
+          printf 'FROM busybox\nRUN echo built > /built\nCMD ["cat","/built"]\n' > "$RUNNER_TEMP/build/Dockerfile"
+          docker build -t acceptance-build:${{ github.run_id }} "$RUNNER_TEMP/build"
+          docker run --rm acceptance-build:${{ github.run_id }}
+          docker rmi acceptance-build:${{ github.run_id }}
+
+      - name: Headless Chromium (Playwright, no --with-deps)
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p pw && cd pw
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright
+          # System libraries are baked into the image; --with-deps would need sudo.
+          npx playwright install chromium
+          node -e '
+            const { chromium } = require("playwright");
+            (async () => {
+              const browser = await chromium.launch({ headless: true });
+              const page = await browser.newPage();
+              await page.setContent("<title>chromium-ok</title>");
+              console.log(await page.title(), browser.version());
+              await browser.close();
+            })().catch((e) => { console.error(e); process.exit(1); });
+          '

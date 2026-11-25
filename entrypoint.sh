@@ -8,14 +8,21 @@
 #   remove     Unregister the runner (needs RUNNER_TOKEN = removal token,
 #              or ACCESS_TOKEN) and exit.
 #   version    Print the runner version and exit.
+#   migrate    Copy a registration from the old /runner volume (mounted at
+#              /runner) into the runner directory and exit.
 #   <other>    Executed as-is (e.g. "bash" for debugging).
 #
 # Runs entirely as the unprivileged `runner` user (Dockerfile `USER runner`).
 # It must never need root: `no-new-privileges` is set, so there is no sudo.
 set -euo pipefail
 
-RUNNER_HOME="/runner"
+# Runner directory: binaries, registration and the job work directory. It is a
+# host bind mount at the SAME absolute path (docker-compose.yml), because jobs
+# talk to the host Docker daemon, which resolves bind-mount paths on the host.
+RUNNER_HOME="${RUNNER_ROOT:-/srv/github-runner}"
 RUNNER_DIST="/opt/runner-dist"
+# Directory used by images before the move to a same-path bind mount.
+LEGACY_RUNNER_HOME="/runner"
 
 log() { echo "[entrypoint] $*"; }
 
@@ -38,7 +45,7 @@ runner_version() {
 sync_runner() {
     if [ ! -w "$RUNNER_HOME" ]; then
         echo "${RUNNER_HOME} is not writable by uid $(id -u)." >&2
-        echo "Fix the volume ownership once with:" >&2
+        echo "Fix the directory ownership once with:" >&2
         echo "  docker compose run --rm --user 0 --entrypoint chown github-runner -R 1001:1001 ${RUNNER_HOME}" >&2
         exit 1
     fi
@@ -69,6 +76,66 @@ cleanup_foreign_diag() {
         log "Warning: ${diag} contains files not owned by uid $(id -u). If the runner"
         log "fails to start, fix ownership with:"
         log "  docker compose run --rm --user 0 --entrypoint chown github-runner -R 1001:1001 ${RUNNER_HOME}"
+    fi
+}
+
+# Copy a registration from the old named volume, mounted at /runner, into the
+# runner directory. The job work directory is not copied (it is a cache).
+migrate_legacy() {
+    if [ ! -f "$LEGACY_RUNNER_HOME/.runner" ]; then
+        echo "No registration found in ${LEGACY_RUNNER_HOME}. Mount the old volume there, e.g.:" >&2
+        echo "  docker compose run --rm -v <project>_runner-data:${LEGACY_RUNNER_HOME} github-runner migrate" >&2
+        exit 1
+    fi
+    if [ -f "$RUNNER_HOME/.runner" ]; then
+        echo "${RUNNER_HOME} already holds a registration; not overwriting it." >&2
+        exit 1
+    fi
+    sync_runner
+    log "Copying registration from ${LEGACY_RUNNER_HOME} to ${RUNNER_HOME}"
+    tar -C "$LEGACY_RUNNER_HOME" --exclude=./_work --exclude=./_diag -cf - . \
+        | tar -C "$RUNNER_HOME" -xpf -
+    # Refresh binaries if the image is newer than the copied ones.
+    sync_runner
+    log "Done. Start the runner with: docker compose up -d"
+}
+
+# Jobs bind-mount paths from the work directory into containers started on the
+# host daemon, so it has to live inside the same-path runner directory.
+check_workdir() {
+    local dir="${RUNNER_WORKDIR:-_work}"
+    case "$dir" in
+        /*) ;;
+        *) dir="$RUNNER_HOME/$dir" ;;
+    esac
+    case "$dir/" in
+        "$RUNNER_HOME"/*) ;;
+        *) log "Warning: RUNNER_WORKDIR (${dir}) is outside ${RUNNER_HOME}; bind mounts from jobs will not resolve on the host." ;;
+    esac
+}
+
+# The runner refuses `services:` and `container:` jobs when /proc/1/cgroup
+# shows a Docker cgroup path, which happens on cgroup v1 hosts (cgroup v2 with
+# Docker's default private cgroup namespace shows "0::/").
+check_cgroup() {
+    if grep -qE ':/docker/|/docker-[0-9a-f]+\.scope' /proc/1/cgroup 2>/dev/null; then
+        log "Warning: /proc/1/cgroup shows a Docker cgroup path; the runner will reject"
+        log "service containers and container jobs. Use a cgroup v2 host"
+        log "(docker info --format '{{.CgroupVersion}}' should print 2)."
+    fi
+}
+
+# Each runner needs its own RUNNER_ROOT. Two compose projects sharing one
+# directory would run the same registration twice.
+check_registration_name() {
+    local registered
+    # The runner writes .runner with a UTF-8 BOM, which jq rejects.
+    registered="$(sed '1s/^\xEF\xBB\xBF//' "$RUNNER_HOME/.runner" 2>/dev/null \
+        | jq -r '.agentName // empty' 2>/dev/null || true)"
+    if [ -n "$registered" ] && [ -n "${RUNNER_NAME:-}" ] && [ "$registered" != "$RUNNER_NAME" ]; then
+        log "Warning: ${RUNNER_HOME} holds the registration of runner '${registered}', but"
+        log "RUNNER_NAME is '${RUNNER_NAME}'. If another runner uses this directory, give"
+        log "each runner its own RUNNER_ROOT (see 'Multiple runners' in README.md)."
     fi
 }
 
@@ -158,6 +225,7 @@ cmd="${1:-run}"
 case "$cmd" in
     configure)
         sync_runner
+        check_workdir
         configure_runner
         ;;
 
@@ -172,6 +240,8 @@ case "$cmd" in
                 exit 1
             fi
         fi
+        check_registration_name
+        check_cgroup
         check_docker_socket
         # Do not leak registration secrets into job environments.
         unset RUNNER_TOKEN ACCESS_TOKEN
@@ -184,9 +254,13 @@ case "$cmd" in
         remove_runner
         ;;
 
+    migrate)
+        migrate_legacy
+        ;;
+
     version)
         echo "image: $(cat "$RUNNER_DIST/.image-runner-version")"
-        echo "volume: $(runner_version "$RUNNER_HOME")"
+        echo "runner dir: $(runner_version "$RUNNER_HOME") ($RUNNER_HOME)"
         ;;
 
     *)

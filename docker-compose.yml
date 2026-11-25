@@ -13,19 +13,27 @@ services:
     environment:
       RUNNER_NAME: ${RUNNER_NAME:-home-server-runner}
       RUNNER_LABELS: ${RUNNER_LABELS:-docker,self-hosted,linux}
+      RUNNER_ROOT: ${RUNNER_ROOT:-/srv/github-runner}
       RUNNER_EPHEMERAL: ${RUNNER_EPHEMERAL:-false}
       # Only used for automatic (PAT-based) registration. Leave unset for
       # the one-time token flow in setup.sh.
       RUNNER_URL: ${RUNNER_URL:-}
       ACCESS_TOKEN: ${ACCESS_TOKEN:-}
 
+    # Runner binaries, registration and the job work directory
+    # (${RUNNER_ROOT}/_work). Mounted at the SAME absolute path as on the host:
+    # jobs use the host Docker daemon, which resolves bind-mount sources such as
+    # `docker run -v "$PWD/x:/x"` or compose `./nginx/templates` on the host.
+    # The host directory must be owned by 1001:1001 (setup.sh does this).
+    # Each runner (compose project) needs its own RUNNER_ROOT.
     volumes:
-      - runner-data:/runner
+      - type: bind
+        source: ${RUNNER_ROOT:-/srv/github-runner}
+        target: ${RUNNER_ROOT:-/srv/github-runner}
+        bind:
+          create_host_path: true
 
     security_opt:
       - no-new-privileges:true
 
     stop_grace_period: 2m
-
-volumes:
-  runner-data:
