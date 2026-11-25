@@ -54,9 +54,13 @@ Edit `.env` and set:
 - `RUNNER_NAME=...`
 - `RUNNER_LABELS=...`
 - `RUNNER_IMAGE=...` (pull mode only; leave it commented out to build)
-- `COMPOSE_FILE=docker-compose.yml:docker-compose.docker-socket.yml` (only if Docker access was confirmed)
+- `COMPOSE_FILE=docker-compose.yml:docker-compose.docker-socket.yml` and `DOCKER_GID=<gid>` (only if Docker access was confirmed)
 
-No `DOCKER_GID` is needed. The entrypoint detects the socket's group at runtime.
+Find `DOCKER_GID` as the socket's group ID seen from inside a container. It is usually `0` on Docker Desktop and the `docker` group's GID on Linux:
+
+```bash
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock busybox stat -c %g /var/run/docker.sock
+```
 
 #### 3b. Optional: PAT mode (automatic or ephemeral registration)
 
@@ -111,7 +115,8 @@ jobs:
 | `Runner is not configured.` and the container restarts in a loop | Registration never succeeded. `docker compose stop`, then rerun step 4 with a new token. |
 | `404 Not Found ... runner-registration` | The token is wrong or expired, or the URL scope doesn't match where the token was generated. Generate a new token. |
 | `A runner exists with the same name` | Already handled: the entrypoint passes `--replace`. If it still fails, pick a different `RUNNER_NAME`. |
-| `permission denied ... docker.sock` in a job | The socket override isn't active. Check `COMPOSE_FILE` in `.env`, then `docker compose up -d --force-recreate`. |
+| `permission denied ... docker.sock` in a job | The socket override isn't active, or `DOCKER_GID` is wrong. The entrypoint logs the socket's actual GID at startup. Check `COMPOSE_FILE` and `DOCKER_GID` in `.env`, then `docker compose up -d --force-recreate`. |
+| `/runner is not writable by uid 1001` or files in `_diag` not owned by 1001 | The volume was created or modified as root. Fix it once: `docker compose run --rm --user 0 --entrypoint chown github-runner -R 1001:1001 /runner`. |
 | `sudo: ... no new privileges` in a job | Expected, because `no-new-privileges` is on. Extend the image with the needed packages instead. |
 | Runner offline in GitHub after an image update | Check `docker compose logs`, and use `docker compose run --rm github-runner version` to compare image and volume versions. |
 
@@ -129,8 +134,8 @@ docker compose down -v     # destructive: deletes the runner volume. Confirm wit
 
 | File | Role |
 | ---- | ---- |
-| `Dockerfile` | Ubuntu 24.04, runner binaries in `/opt/runner-dist`, Docker CLI (`INSTALL_DOCKER_CLI`), pinned `ARG RUNNER_VERSION` |
-| `entrypoint.sh` | Root init: sync binaries into the `/runner` volume, fix ownership, grant socket group. Then `gosu runner`. Commands: `run`, `configure`, `remove`, `version` |
+| `Dockerfile` | Ubuntu 24.04, runner binaries in `/opt/runner-dist`, Docker CLI (`INSTALL_DOCKER_CLI`), pinned `ARG RUNNER_VERSION`, `USER runner` (uid/gid pinned to 1001) |
+| `entrypoint.sh` | Runs as `runner`, never root: syncs binaries into the `/runner` volume, removes stale foreign-owned `_diag` logs, checks socket access. Commands: `run`, `configure`, `remove`, `version` |
 | `docker-compose.yml` | Single `github-runner` service plus a named volume. Uses `image:` and `build:` so pull and build both work |
 | `docker-compose.docker-socket.yml` | Opt-in override that mounts the host socket |
 | `setup.sh` | Builds or pulls the image, registers in a one-off container, starts the stack |
@@ -141,8 +146,9 @@ Conventions and constraints:
 - Keep `CONTEXT.md` **untracked**. It is a local reference note and is gitignored. Do not delete it.
 - Keep secrets out of the image, Compose files and `.env.example`.
 - To bump the runner, change `ARG RUNNER_VERSION` in `Dockerfile`. Latest version: `curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name`.
-- Workflows run as the unprivileged `runner` user (uid 1001). Do not make the runner process run as root.
-- `group_add` in Compose does **not** work for the runner user, because `gosu` resets supplementary groups. Socket access is granted in `entrypoint.sh` (`grant_docker_socket`).
+- The whole container runs as the unprivileged `runner` user (uid/gid 1001, pinned in the `Dockerfile`), including the entrypoint and `docker-init`. Do not add root-only steps to `entrypoint.sh`: there is no root and no sudo (`no-new-privileges`). Root-only setup belongs at build time.
+- Docker socket access comes from Compose `group_add: [DOCKER_GID]` in `docker-compose.docker-socket.yml`.
+- Never execute `Runner.Listener` (even `--version`) from the entrypoint. Every invocation writes a log to `/runner/_diag`, and those names have one-second resolution, so the log can collide with the real listener's. Read the version from `bin/Runner.Listener.deps.json` instead.
 
 Verify changes before committing:
 
@@ -152,6 +158,7 @@ docker compose config -q
 docker buildx build --platform linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') --load -t github-runner:local .
 docker compose -p citest run --rm github-runner version    # prints image/volume versions
 docker compose -p citest run --rm github-runner            # expect "Runner is not configured." exit 1
+docker compose -p citest run --rm github-runner bash -c 'id; find /runner -user 0'   # uid=1001, no output from find
 docker compose -p citest down -v
 ```
 

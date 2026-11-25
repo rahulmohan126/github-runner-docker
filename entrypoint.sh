@@ -9,6 +9,9 @@
 #              or ACCESS_TOKEN) and exit.
 #   version    Print the runner version and exit.
 #   <other>    Executed as-is (e.g. "bash" for debugging).
+#
+# Runs entirely as the unprivileged `runner` user (Dockerfile `USER runner`).
+# It must never need root: `no-new-privileges` is set, so there is no sudo.
 set -euo pipefail
 
 RUNNER_HOME="/runner"
@@ -18,9 +21,13 @@ log() { echo "[entrypoint] $*"; }
 
 runner_version() {
     # Prints the version of the runner installed in $1 (empty if none).
-    if [ -x "$1/bin/Runner.Listener" ]; then
-        "$1/bin/Runner.Listener" --version 2>/dev/null | tr -d '[:space:]' || true
-    fi
+    # Read from the deps manifest instead of running `Runner.Listener --version`:
+    # every Runner.Listener invocation writes a log to $1/_diag, which used to
+    # race with the real listener start (same-second log file name).
+    local deps="$1/bin/Runner.Listener.deps.json"
+    [ -f "$deps" ] || return 0
+    grep -o -m1 '"Runner\.Listener/[0-9][^"]*"' "$deps" \
+        | sed 's/^"Runner\.Listener\///; s/"$//' || true
 }
 
 # --- Initialise / refresh the persistent runner directory -------------------
@@ -29,7 +36,12 @@ runner_version() {
 # self-update may already have moved the volume ahead, which is fine).
 # Registration files (.runner, .credentials*) and _work are never touched.
 sync_runner() {
-    mkdir -p "$RUNNER_HOME"
+    if [ ! -w "$RUNNER_HOME" ]; then
+        echo "${RUNNER_HOME} is not writable by uid $(id -u)." >&2
+        echo "Fix the volume ownership once with:" >&2
+        echo "  docker compose run --rm --user 0 --entrypoint chown github-runner -R 1001:1001 ${RUNNER_HOME}" >&2
+        exit 1
+    fi
     local image_ver installed_ver
     image_ver="$(cat "$RUNNER_DIST/.image-runner-version")"
     installed_ver="$(runner_version "$RUNNER_HOME")"
@@ -43,32 +55,38 @@ sync_runner() {
         cp -a "$RUNNER_DIST/." "$RUNNER_HOME/"
     fi
 
-    # Only fix ownership of top-level entries that are wrong, so a large
-    # _work directory does not get re-chowned on every start.
-    if [ "$(stat -c %u "$RUNNER_HOME")" != "$(id -u runner)" ]; then
-        chown runner:runner "$RUNNER_HOME"
+    cleanup_foreign_diag
+}
+
+# Older images ran `Runner.Listener --version` as root, leaving root-owned
+# logs in _diag; one of them can block the listener from opening its log.
+# _diag itself is owned by the runner user, so those files can be deleted.
+cleanup_foreign_diag() {
+    local diag="$RUNNER_HOME/_diag"
+    [ -d "$diag" ] || return 0
+    find "$diag" -mindepth 1 -maxdepth 1 -type f ! -user "$(id -u)" -delete 2>/dev/null || true
+    if [ -n "$(find "$diag" ! -user "$(id -u)" -print -quit 2>/dev/null)" ]; then
+        log "Warning: ${diag} contains files not owned by uid $(id -u). If the runner"
+        log "fails to start, fix ownership with:"
+        log "  docker compose run --rm --user 0 --entrypoint chown github-runner -R 1001:1001 ${RUNNER_HOME}"
     fi
-    find "$RUNNER_HOME" -mindepth 1 -maxdepth 1 ! -user runner -exec chown -R runner:runner {} +
 }
 
 # --- Docker socket access ----------------------------------------------------
-# If a Docker socket is mounted, add the runner user to a group matching the
-# socket's GID. (Compose `group_add` alone does not work: gosu resets
-# supplementary groups from /etc/group when switching user.)
-grant_docker_socket() {
+# Access is granted by Compose `group_add: [DOCKER_GID]` (see
+# docker-compose.docker-socket.yml); the container cannot change its own
+# groups. This only reports a mismatch so it is easy to diagnose.
+check_docker_socket() {
     local sock="${DOCKER_SOCKET:-/var/run/docker.sock}"
     [ -S "$sock" ] || return 0
-    local gid group
+    local gid
     gid="$(stat -c %g "$sock")"
-    group="$(getent group "$gid" | cut -d: -f1 || true)"
-    if [ -z "$group" ]; then
-        group="docker-host"
-        groupadd -g "$gid" "$group"
+    if [ -r "$sock" ] && [ -w "$sock" ]; then
+        log "Docker socket detected (gid ${gid}); access OK"
+    else
+        log "Warning: no access to ${sock} (gid ${gid}; process groups: $(id -G))."
+        log "Set DOCKER_GID=${gid} in .env and run: docker compose up -d --force-recreate"
     fi
-    if ! id -nG runner | tr ' ' '\n' | grep -qx "$group"; then
-        usermod -aG "$group" runner
-    fi
-    log "Docker socket detected (gid ${gid}); runner added to group '${group}'"
 }
 
 # --- Registration token helpers ---------------------------------------------
@@ -125,13 +143,13 @@ configure_runner() {
 
     log "Registering runner '${RUNNER_NAME:-$(hostname)}' at ${RUNNER_URL}"
     # Arguments are passed as an argv array: no shell interpolation of secrets.
-    (cd "$RUNNER_HOME" && gosu runner ./config.sh "${args[@]}")
+    (cd "$RUNNER_HOME" && ./config.sh "${args[@]}")
 }
 
 remove_runner() {
     local token
     token="$(resolve_token remove-token)"
-    (cd "$RUNNER_HOME" && gosu runner ./config.sh remove --token "$token")
+    (cd "$RUNNER_HOME" && ./config.sh remove --token "$token")
 }
 
 # --- Main --------------------------------------------------------------------
@@ -154,11 +172,11 @@ case "$cmd" in
                 exit 1
             fi
         fi
-        grant_docker_socket
+        check_docker_socket
         # Do not leak registration secrets into job environments.
         unset RUNNER_TOKEN ACCESS_TOKEN
         cd "$RUNNER_HOME"
-        exec gosu runner ./run.sh
+        exec ./run.sh
         ;;
 
     remove)

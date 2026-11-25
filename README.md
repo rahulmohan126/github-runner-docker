@@ -4,7 +4,7 @@ A Docker image and Compose stack for running **GitHub Actions self-hosted runner
 
 - Ubuntu 24.04 with the official [actions/runner](https://github.com/actions/runner) binaries
 - Multi-arch images (`linux/amd64`, `linux/arm64`)
-- Workflows run as a non-root `runner` user. The container has `no-new-privileges` set and exposes no ports.
+- The whole container runs as a non-root `runner` user (uid/gid 1001), with no root step at startup. It has `no-new-privileges` set and exposes no ports.
 - Registration and the work directory persist in a Docker volume, so the runner survives restarts and reboots
 - The one-time registration token is never written to disk
 - Optional extras: access to the host Docker daemon, ephemeral runners, automatic PAT-based registration
@@ -85,9 +85,18 @@ The image includes the Docker CLI with the buildx and compose plugins, but no da
 
 ```
 COMPOSE_FILE=docker-compose.yml:docker-compose.docker-socket.yml
+DOCKER_GID=<gid>
 ```
 
-then `docker compose up -d`. At startup the entrypoint finds the socket's group ID and gives the `runner` user access to it.
+`DOCKER_GID` is the socket's group ID as seen inside a container. It is usually `0` on Docker Desktop and the `docker` group's GID on Linux. Find it with:
+
+```bash
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock busybox stat -c %g /var/run/docker.sock
+```
+
+then `docker compose up -d`. Compose adds that group to the container's `runner` user (`group_add`). If the GID is wrong, the entrypoint logs the socket's actual GID at startup.
+
+> Upgrading from an image older than the non-root change? The entrypoint no longer edits `/etc/group` at startup, so add `DOCKER_GID` to `.env` and update `docker-compose.docker-socket.yml` from this repo.
 
 > ⚠️ Mounting `/var/run/docker.sock` gives every workflow **root-equivalent control of the host**. Only do this for private repositories you fully control. A safer but more complex alternative is a separate Docker-in-Docker sidecar.
 

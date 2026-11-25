@@ -19,7 +19,7 @@ LABEL org.opencontainers.image.title="github-runner" \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git gnupg gosu gzip jq tar unzip zip \
+        ca-certificates curl git gnupg gzip jq tar unzip zip \
     && if [ "$INSTALL_DOCKER_CLI" = "true" ]; then \
         install -m 0755 -d /etc/apt/keyrings \
         && curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc \
@@ -33,7 +33,13 @@ RUN apt-get update \
     fi \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -u 1001 -s /bin/bash runner
+# UID/GID are pinned: existing /runner volumes are owned by 1001:1001, and a
+# rebuild that picked different IDs would lock the runner out of its own
+# registration. /runner is pre-created with that owner so a fresh named
+# volume inherits it (Docker copies the mount point's ownership).
+RUN groupadd -g 1001 runner \
+    && useradd -m -u 1001 -g 1001 -s /bin/bash runner \
+    && install -d -o 1001 -g 1001 /runner
 
 WORKDIR /opt/runner-dist
 
@@ -58,6 +64,10 @@ RUN set -eux; \
 COPY --chmod=0755 entrypoint.sh /entrypoint.sh
 
 VOLUME ["/runner"]
+
+# The whole container runs unprivileged, including the entrypoint and the
+# init process. Nothing in /runner is ever written as root.
+USER runner
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["run"]

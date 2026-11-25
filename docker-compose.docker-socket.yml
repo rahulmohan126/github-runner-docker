@@ -5,10 +5,16 @@
 #
 # Enable by adding to .env:
 #   COMPOSE_FILE=docker-compose.yml:docker-compose.docker-socket.yml
+#   DOCKER_GID=<group id of the socket, as seen inside a container>
 #
-# The entrypoint detects the socket's group ID at startup and grants the
-# runner user access, so no DOCKER_GID setting is needed.
+# Find DOCKER_GID with (prints e.g. 999 on Linux, 0 on Docker Desktop):
+#   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock busybox stat -c %g /var/run/docker.sock
+#
+# The container runs as the unprivileged runner user and cannot change its own
+# groups, so the socket's group is added here instead.
 services:
   github-runner:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:?Set DOCKER_GID in .env (see docker-compose.docker-socket.yml)}"
