@@ -1,12 +1,18 @@
-# Give workflows the HOST Docker daemon, with host networking. This is the
-# default for the CI deployment (.env.example enables it).
+# OPT-IN, off by default: give workflows the HOST Docker daemon, with host
+# networking. Without it, jobs cannot use Docker at all: no docker
+# build/run/compose, no Actions `services:` or `container:` jobs, no
+# testcontainers. Route those jobs to a different runner.
 #
-# WARNING: anyone who can run a workflow on this runner gets root-equivalent
-# control of the host. Use only with private repositories you fully control.
+# WARNING: anyone who can run a workflow on this runner gets ROOT ON THE HOST
+# (e.g. `docker run --privileged -v /:/host ...`), and can control every other
+# container on it, including other runners'. Only enable it on a machine
+# where that is acceptable.
 #
 # Enable by adding to .env:
 #   COMPOSE_FILE=docker-compose.yml:docker-compose.docker-socket.yml
 #   DOCKER_GID=<group id of the socket, as seen inside a container>
+# and add a `docker` label to RUNNER_LABELS (before registering), so
+# workflows can target Docker-capable runners with runs-on: [self-hosted, docker].
 #
 # Find DOCKER_GID with (prints e.g. 999 on Linux, 0 on Docker Desktop):
 #   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock busybox stat -c %g /var/run/docker.sock

@@ -106,10 +106,12 @@ fi
 # The runner directory is a host bind mount (same path inside the container)
 # and must be owned by the runner user, uid/gid 1001. Docker creates a missing
 # directory as root, so fix ownership of the top-level directory once, in a
-# throwaway container. The runner itself never runs as root.
+# throwaway container with only the capabilities that needs. The runner
+# itself never runs as root.
 echo "Preparing runner directory ${RUNNER_ROOT}..."
 if ! "${COMPOSE[@]}" run --rm --no-deps --entrypoint test github-runner -w "$RUNNER_ROOT" 2>/dev/null; then
-    "${COMPOSE[@]}" run --rm --no-deps --user 0 --entrypoint install github-runner \
+    "${COMPOSE[@]}" run --rm --no-deps --user 0 --cap-add CHOWN --cap-add FOWNER \
+        --entrypoint install github-runner \
         -d -o 1001 -g 1001 -m 0755 "$RUNNER_ROOT"
 fi
 

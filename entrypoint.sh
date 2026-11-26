@@ -46,7 +46,7 @@ sync_runner() {
     if [ ! -w "$RUNNER_HOME" ]; then
         echo "${RUNNER_HOME} is not writable by uid $(id -u)." >&2
         echo "Fix the directory ownership once with:" >&2
-        echo "  docker compose run --rm --user 0 --entrypoint chown github-runner -R 1001:1001 ${RUNNER_HOME}" >&2
+        echo "  docker compose run --rm --no-deps --user 0 --cap-add CHOWN --entrypoint chown github-runner -R 1001:1001 ${RUNNER_HOME}" >&2
         exit 1
     fi
     local image_ver installed_ver
@@ -75,7 +75,7 @@ cleanup_foreign_diag() {
     if [ -n "$(find "$diag" ! -user "$(id -u)" -print -quit 2>/dev/null)" ]; then
         log "Warning: ${diag} contains files not owned by uid $(id -u). If the runner"
         log "fails to start, fix ownership with:"
-        log "  docker compose run --rm --user 0 --entrypoint chown github-runner -R 1001:1001 ${RUNNER_HOME}"
+        log "  docker compose run --rm --no-deps --user 0 --cap-add CHOWN --entrypoint chown github-runner -R 1001:1001 ${RUNNER_HOME}"
     fi
 }
 
@@ -140,12 +140,17 @@ check_registration_name() {
 }
 
 # --- Docker socket access ----------------------------------------------------
-# Access is granted by Compose `group_add: [DOCKER_GID]` (see
-# docker-compose.docker-socket.yml); the container cannot change its own
-# groups. This only reports a mismatch so it is easy to diagnose.
+# Docker is opt-in (docker-compose.docker-socket.yml). Access is granted by
+# Compose `group_add: [DOCKER_GID]`; the container cannot change its own
+# groups. This only reports the state so it is easy to diagnose.
 check_docker_socket() {
     local sock="${DOCKER_SOCKET:-/var/run/docker.sock}"
-    [ -S "$sock" ] || return 0
+    if [ ! -S "$sock" ]; then
+        log "Docker: not available (no socket mounted). Jobs that need Docker,"
+        log "services: or testcontainers must run on a different runner."
+        return 0
+    fi
+    check_cgroup
     local gid
     gid="$(stat -c %g "$sock")"
     if [ -r "$sock" ] && [ -w "$sock" ]; then
@@ -201,7 +206,7 @@ configure_runner() {
         --url "$RUNNER_URL"
         --token "$token"
         --name "${RUNNER_NAME:-$(hostname)}"
-        --labels "${RUNNER_LABELS:-docker,self-hosted,linux}"
+        --labels "${RUNNER_LABELS:-self-hosted,linux}"
         --work "${RUNNER_WORKDIR:-_work}"
     )
     [ -n "${RUNNER_GROUP:-}" ] && args+=(--runnergroup "$RUNNER_GROUP")
@@ -241,7 +246,6 @@ case "$cmd" in
             fi
         fi
         check_registration_name
-        check_cgroup
         check_docker_socket
         # Do not leak registration secrets into job environments.
         unset RUNNER_TOKEN ACCESS_TOKEN

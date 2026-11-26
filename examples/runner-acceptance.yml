@@ -1,40 +1,32 @@
-# Acceptance checks for a runner deployed with this repo's CI defaults
-# (host Docker socket, host networking, same-path runner directory).
+# Acceptance checks for a runner deployed with this repo.
 #
 # Copy into the repository the runner is registered to, e.g.
-#   humming/.github/workflows/runner-acceptance.yml
-# and run it from the Actions tab. A workflow in github-runner-docker itself
-# would never reach the runner, which is registered to that other repo.
+#   <repo>/.github/workflows/runner-acceptance.yml
+# replace my-project with one of the runner's labels, and run it from the
+# Actions tab. A workflow in github-runner-docker itself would never reach a
+# runner registered to another repo.
+#
+# The `acceptance` job runs on any runner and also confirms that Docker is NOT
+# reachable (the default). Tick the `docker` input only to test a runner that
+# has the opt-in Docker override and a `docker` label; otherwise that job
+# would wait for a runner that never comes.
 name: Self-hosted runner acceptance
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      docker:
+        description: "Also test Docker (only for runners with the Docker override and a docker label)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   acceptance:
-    # Replace my-project with a label from the runner's RUNNER_LABELS. Getting a
-    # job at all proves the runner is online with that label.
+    # Getting a job at all proves the runner is online with this label.
     runs-on: [self-hosted, linux, my-project]
-
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: postgres
-        # Fixed host port, as the CI uses. Fails if another job or a local
-        # Postgres already holds 5432 on the host (see README, "Concurrency").
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
-      redis:
-        image: redis:7-alpine
-        # Random host port: the concurrency-safe pattern (and what testcontainers does).
-        ports: ["6379"]
-        options: >-
-          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
-
     steps:
       - uses: actions/checkout@v7
 
@@ -44,6 +36,20 @@ jobs:
           id
           uname -a
           echo "workspace: $GITHUB_WORKSPACE"
+
+      - name: No root, no sudo
+        run: |
+          test "$(id -u)" != 0
+          if sudo -n true 2>/dev/null; then echo "::error::sudo works"; exit 1; fi
+
+      - name: Docker is not reachable
+        if: ${{ !inputs.docker }}
+        run: |
+          if docker info >/dev/null 2>&1; then
+            echo "::error::A Docker daemon is reachable from this runner"
+            exit 1
+          fi
+          echo "OK: no Docker daemon"
 
       - name: Build tools (cgo needs gcc)
         run: gcc --version
@@ -85,6 +91,51 @@ jobs:
           EOF
           CGO_ENABLED=1 go test -race ./...
 
+      - name: Headless Chromium (Playwright, no --with-deps)
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir -p pw && cd pw
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund playwright
+          # System libraries are baked into the image; --with-deps would need sudo.
+          npx playwright install chromium
+          node -e '
+            const { chromium } = require("playwright");
+            (async () => {
+              const browser = await chromium.launch({ headless: true });
+              const page = await browser.newPage();
+              await page.setContent("<title>chromium-ok</title>");
+              console.log(await page.title(), browser.version());
+              await browser.close();
+            })().catch((e) => { console.error(e); process.exit(1); });
+          '
+
+  docker:
+    # Only for runners with the opt-in Docker override (root-equivalent on the
+    # host). See "Host Docker access (opt-in)" in github-runner-docker's README.
+    if: ${{ inputs.docker }}
+    runs-on: [self-hosted, linux, docker, my-project]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        # Fixed host port. Fails if another job or a local Postgres already
+        # holds 5432 on the host (see README, "Multiple runners").
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s --health-timeout 5s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        # Random host port: the concurrency-safe pattern (and what testcontainers does).
+        ports: ["6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 5s --health-retries 30
+
+    steps:
+      - uses: actions/checkout@v7
+
       - name: docker run
         run: docker run --rm hello-world
 
@@ -125,22 +176,3 @@ jobs:
           docker build -t acceptance-build:${{ github.run_id }} "$RUNNER_TEMP/build"
           docker run --rm acceptance-build:${{ github.run_id }}
           docker rmi acceptance-build:${{ github.run_id }}
-
-      - name: Headless Chromium (Playwright, no --with-deps)
-        working-directory: ${{ runner.temp }}
-        run: |
-          mkdir -p pw && cd pw
-          npm init -y >/dev/null
-          npm install --no-audit --no-fund playwright
-          # System libraries are baked into the image; --with-deps would need sudo.
-          npx playwright install chromium
-          node -e '
-            const { chromium } = require("playwright");
-            (async () => {
-              const browser = await chromium.launch({ headless: true });
-              const page = await browser.newPage();
-              await page.setContent("<title>chromium-ok</title>");
-              console.log(await page.title(), browser.version());
-              await browser.close();
-            })().catch((e) => { console.error(e); process.exit(1); });
-          '

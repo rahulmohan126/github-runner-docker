@@ -17,7 +17,7 @@ Work through the steps in order and stop to ask the user wherever a step says to
 
 - **Never write a registration token, removal token or PAT to any file**, including `.env`, shell history files, notes and commit messages. Pass tokens only as environment variables on a single command. The exception is when the user explicitly chooses PAT mode (step 3b): the PAT then goes in `.env`, which is gitignored. Say clearly that it is stored on disk.
 - Registration tokens expire about **1 hour** after they are generated. Ask for the token only when you are ready to run `setup.sh`, not earlier.
-- `.env.example` enables host Docker socket access and host networking by default, because this deployment's CI needs them. Before keeping that default, explain that it gives workflows root-equivalent access to the host and get confirmation. If the user declines, comment out `COMPOSE_FILE` and `DOCKER_GID` in `.env`.
+- Runners have **no Docker access by default**. Do not enable the Docker socket override (`docker-compose.docker-socket.yml`) unless the user asks for it. Before enabling it, explain that any workflow then gets root on the host and can control every other container on it, including other runners', and get explicit confirmation.
 - Do not enable PAT mode or ephemeral mode unless the user asks for it or agrees after you explain the trade-offs.
 - Do not use this runner for **public** repositories without warning the user. Fork PRs can run arbitrary code on their machine.
 
@@ -38,12 +38,12 @@ Ask for:
 
 1. **Runner scope URL**: either `https://github.com/<owner>/<repo>` (recommended) or `https://github.com/<org>` for an org-wide runner.
 2. **Runner name** (default `home-server-runner`). It must be unique among the runners registered at that scope. If this machine already runs one, suggest something like `<hostname>-runner-2`.
-3. **Labels** (default `docker,self-hosted,linux`). Suggest adding a project-specific label, such as the repo or org name, so workflows can target this runner.
+3. **Labels** (default `self-hosted,linux`). Suggest adding a project-specific label, such as the repo or org name, so workflows can target this runner.
 4. **Runner directory** `RUNNER_ROOT` (default `/srv/github-runner`). It is bind-mounted at the same path inside the container and must be unique per runner, e.g. `/srv/github-runner-2` for a second one.
 5. **Image source**:
    - *Pull* the published image `rahulmohan126/github-runner:latest` (from Docker Hub), or another image the user names.
    - *Build* locally (the default if they have no published image).
-6. Confirm **Docker access** (on by default, see step 0). It mounts the host Docker socket, gives workflows root-equivalent access to the host, and puts the runner on the host network. Get explicit confirmation.
+6. Whether workflows need **Docker** (`docker build/run/compose`, Actions `services:`, testcontainers). Explain that the default is no Docker, and that such jobs should run on a different runner (e.g. GitHub's `ubuntu-latest`). Enabling it here mounts the host Docker socket, which gives workflows root on the host. Only enable it if the user explicitly accepts that (see step 0); then add a `docker` label too.
 
 ### 3. Configure `.env`
 
@@ -57,7 +57,7 @@ Edit `.env` and set:
 - `RUNNER_LABELS=...`
 - `RUNNER_ROOT=...` (absolute path; `setup.sh` creates it owned by 1001:1001)
 - `RUNNER_IMAGE=...` (pull mode only; leave it commented out to build)
-- `DOCKER_GID=<gid>` (required while `COMPOSE_FILE` includes `docker-compose.docker-socket.yml`; comment out both if Docker access was declined)
+- `COMPOSE_FILE=docker-compose.yml:docker-compose.docker-socket.yml` and `DOCKER_GID=<gid>` (only if Docker access was explicitly confirmed)
 
 Find `DOCKER_GID` as the socket's group ID seen from inside a container. It is usually `0` on Docker Desktop and the `docker` group's GID on Linux:
 
@@ -75,7 +75,7 @@ Use this only if the user wants zero-touch re-registration or `RUNNER_EPHEMERAL=
 Then skip step 4. Create the runner directory first, because nothing else does in this mode, then start:
 
 ```bash
-docker compose run --rm --no-deps --user 0 --entrypoint install github-runner -d -o 1001 -g 1001 -m 0755 "<RUNNER_ROOT>"
+docker compose run --rm --no-deps --user 0 --cap-add CHOWN --cap-add FOWNER --entrypoint install github-runner -d -o 1001 -g 1001 -m 0755 "<RUNNER_ROOT>"
 docker compose up -d       # add --build if building locally
 ```
 
@@ -113,9 +113,10 @@ Success looks like `Connected to GitHub` followed by `Listening for Jobs`. Ask t
 | `404 Not Found ... runner-registration` | The token is wrong or expired, or the URL scope doesn't match where the token was generated. Generate a new token. |
 | `A runner exists with the same name` | Already handled: the entrypoint passes `--replace`. If it still fails, pick a different `RUNNER_NAME`. |
 | `permission denied ... docker.sock` in a job | The socket override isn't active, or `DOCKER_GID` is wrong. The entrypoint logs the socket's actual GID at startup. Check `COMPOSE_FILE` and `DOCKER_GID` in `.env`, then `docker compose up -d --force-recreate`. |
-| `<RUNNER_ROOT> is not writable by uid 1001` or files in `_diag` not owned by 1001 | The host directory was created or modified as root. Fix it once: `docker compose run --rm --user 0 --entrypoint chown github-runner -R 1001:1001 <RUNNER_ROOT>`. |
+| `<RUNNER_ROOT> is not writable by uid 1001` or files in `_diag` not owned by 1001 | The host directory was created or modified as root. Fix it once: `docker compose run --rm --no-deps --user 0 --cap-add CHOWN --entrypoint chown github-runner -R 1001:1001 <RUNNER_ROOT>`. |
 | `Runner is not configured.` after upgrading from the old `/runner` volume | The registration is still in the old volume. Re-register, or run `migrate`. See "Migrating from the `/runner` volume" in README.md. |
-| A job can't reach `localhost:<port>` of a service container | Host networking is off: `COMPOSE_FILE` must include `docker-compose.docker-socket.yml`. |
+| Jobs fail with `docker: command not found`-like errors, `Cannot connect to the Docker daemon`, or `services:` / testcontainers errors | Expected: the runner has no Docker by default (log line `Docker: not available`). Run those jobs on a runner with Docker, or enable the override (step 0). |
+| With the override, a job can't reach `localhost:<port>` of a service container | Host networking is off: `COMPOSE_FILE` must include `docker-compose.docker-socket.yml`. |
 | `docker run -v "$PWD/..."` in a job mounts an empty directory | The work directory isn't at the same path on the host. Check `RUNNER_ROOT`, and that `RUNNER_WORKDIR` is unset or inside it. |
 | `Container feature is not supported when runner is already running inside container` | The host uses cgroup v1. Use a cgroup v2 host (`docker info --format '{{.CgroupVersion}}'` prints `2`). |
 | `actions/checkout` fails with `EACCES` / permission denied while cleaning | A container wrote root-owned files into the workspace. Delete them with `docker run --rm -v "$RUNNER_ROOT/_work:/w" busybox rm -rf /w/<repo>`, and run such containers with `--user`. |
@@ -142,7 +143,7 @@ sudo rm -rf '<RUNNER_ROOT>'  # destructive: deletes the registration and _work. 
 | `Dockerfile` | Ubuntu 24.04, build tools, Chromium libraries (via a throwaway Node + `playwright install-deps`), runner binaries in `/opt/runner-dist`, Docker CLI (`INSTALL_DOCKER_CLI`), pinned `ARG RUNNER_VERSION`, `USER runner` (uid/gid pinned to 1001) |
 | `entrypoint.sh` | Runs as `runner`, never root: syncs binaries into `RUNNER_ROOT` (default `/srv/github-runner`), removes stale foreign-owned `_diag` logs, checks socket access. Commands: `run`, `configure`, `remove`, `version`, `migrate` |
 | `docker-compose.yml` | Single `github-runner` service with `RUNNER_ROOT` bind-mounted at the same path. Uses `image:` and `build:` so pull and build both work |
-| `docker-compose.docker-socket.yml` | Host socket plus `network_mode: host`; enabled by default in `.env.example` |
+| `docker-compose.docker-socket.yml` | Opt-in (off by default): host socket plus `network_mode: host`. Root-equivalent |
 | `examples/runner-acceptance.yml` | Acceptance workflow to copy into the repo the runner serves |
 | `setup.sh` | Builds or pulls the image, registers in a one-off container, starts the stack |
 | `.github/workflows/docker-publish.yml` | Multi-arch build. Pushes to Docker Hub on `main`, `v*` tags and a weekly schedule |
@@ -153,7 +154,8 @@ Conventions and constraints:
 - Keep secrets out of the image, Compose files and `.env.example`.
 - To bump the runner, change `ARG RUNNER_VERSION` in `Dockerfile`. Latest version: `curl -fsSL https://api.github.com/repos/actions/runner/releases/latest | jq -r .tag_name`.
 - The whole container runs as the unprivileged `runner` user (uid/gid 1001, pinned in the `Dockerfile`), including the entrypoint and `docker-init`. Do not add root-only steps to `entrypoint.sh`: there is no root and no sudo (`no-new-privileges`). Root-only setup belongs at build time.
-- Docker socket access comes from Compose `group_add: [DOCKER_GID]` in `docker-compose.docker-socket.yml`.
+- Runners have no Docker access by default, and `docker-compose.yml` must not mount the socket. Socket access is opt-in only, via Compose `group_add: [DOCKER_GID]` in `docker-compose.docker-socket.yml`.
+- `docker-compose.yml` sets `cap_drop: [ALL]`. One-off `--user 0` maintenance commands must add only the capabilities they need (`--cap-add CHOWN`, `FOWNER`, `DAC_OVERRIDE`).
 - The runner directory must be at the same absolute path on the host and in the container, because jobs' bind mounts are resolved by the host daemon. Don't reintroduce a named volume or a fixed in-container path.
 - Jobs have no sudo or apt. System packages workflows need (e.g. Playwright's `--with-deps`) must be baked into the `Dockerfile`.
 - Never execute `Runner.Listener` (even `--version`) from the entrypoint. Every invocation writes a log to `$RUNNER_ROOT/_diag`, and those names have one-second resolution, so the log can collide with the real listener's. Read the version from `bin/Runner.Listener.deps.json` instead.
@@ -165,11 +167,11 @@ bash -n entrypoint.sh setup.sh
 docker compose config -q
 export RUNNER_ROOT="$(mktemp -d)"   # any absolute path Docker can bind-mount (on macOS, under /private/tmp)
 docker buildx build --platform linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') --load -t github-runner:local .
-docker compose -p citest run --rm --no-deps --user 0 --entrypoint install github-runner -d -o 1001 -g 1001 -m 0755 "$RUNNER_ROOT"   # as setup.sh does
+docker compose -p citest run --rm --no-deps --user 0 --cap-add CHOWN --cap-add FOWNER --entrypoint install github-runner -d -o 1001 -g 1001 -m 0755 "$RUNNER_ROOT"   # as setup.sh does
 docker compose -p citest run --rm github-runner version    # prints image and runner-dir versions
 docker compose -p citest run --rm github-runner            # expect "Runner is not configured." exit 1
 docker compose -p citest run --rm github-runner bash -c 'id; find "$RUNNER_ROOT" -user 0'   # uid=1001, no output from find
-docker compose -p citest run --rm --no-deps --user 0 --entrypoint find github-runner "$RUNNER_ROOT" -mindepth 1 -delete   # files are owned by 1001
+docker compose -p citest run --rm --no-deps --user 0 --cap-add DAC_OVERRIDE --cap-add FOWNER --entrypoint find github-runner "$RUNNER_ROOT" -mindepth 1 -delete   # files are owned by 1001
 docker compose -p citest down -v && rm -rf "$RUNNER_ROOT"
 ```
 
